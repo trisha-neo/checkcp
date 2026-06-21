@@ -1,0 +1,18 @@
+CXX      ?= g++
+CXXFLAGS  = -std=c++17 -O2 -Wall -Wextra -Isrc
+TARGET    = checkcp
+SRCS      = src/main.cpp src/checksum.cpp
+
+OPENSSL_CFLAGS := $(shell pkg-config --cflags libcrypto 2>/dev/null)
+OPENSSL_LIBS   := $(shell pkg-config --libs   libcrypto 2>/dev/null || echo "-lcrypto")
+
+$(TARGET): $(SRCS) src/checksum.h
+	$(CXX) $(CXXFLAGS) $(OPENSSL_CFLAGS) -o $@ $(SRCS) $(OPENSSL_LIBS)
+
+install: $(TARGET)
+	install -m 755 $(TARGET) /usr/local/bin/$(TARGET)
+
+clean:
+	rm -f $(TARGET)
+
+.PHONY: install clean
