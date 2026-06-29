@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -20,7 +21,9 @@ static void print_usage() {
         "       checkcp [OPTIONS] SOURCE... DIRECTORY\n"
         "\n"
         "A drop-in replacement for cp that maintains SHA-256 integrity sidecars.\n"
-        "A '<file>.sha256' sidecar is written alongside every destination file.\n"
+        "Single file: a '<file>.sha256' sidecar is written alongside the destination.\n"
+        "Multiple files or directory: a single 'checksums.sha256' is written in the\n"
+        "destination directory, compatible with 'sha256sum -c checksums.sha256'.\n"
         "Warnings are emitted when source or destination integrity checks fail.\n"
         "\n"
         "Options:\n"
@@ -36,7 +39,6 @@ static int verify_file(const fs::path& file) {
     if (!fs::exists(file)) {
         std::cerr << "checkcp: " << file << ": No such file or directory\n";
         return 1;
-    }
     const fs::path sc = sidecar_path(file);
     if (!fs::exists(sc)) {
         std::cerr << "checkcp: No sidecar found: " << sc << "\n";
@@ -64,8 +66,15 @@ static int verify_file(const fs::path& file) {
     return 1;
 }
 
-static bool copy_with_integrity(const fs::path& src, const fs::path& dst,
-                                 const Options& opts, int& warnings, int& copied) {
+// Core copy: verify source, honour no-clobber, copy + hash. No sidecar is written.
+// Returns true on success or skip; false on hard error.
+// out_hash is set to the hash of the copied data, or empty if the file was skipped.
+static bool copy_file_core(const fs::path& src, const fs::path& dst,
+                            const Options& opts, int& warnings, int& copied,
+                            std::string& out_hash) {
+    out_hash.clear();
+
+    // --- 1. Verify source integrity if a sidecar exists ---
     const fs::path src_sc = sidecar_path(src);
     if (fs::exists(src_sc)) {
         const std::string stored = read_sidecar(src_sc);
@@ -90,12 +99,14 @@ static bool copy_with_integrity(const fs::path& src, const fs::path& dst,
         }
     }
 
+    // --- 2. Honour no-clobber ---
     if (opts.no_clobber && fs::exists(dst)) {
         if (opts.verbose)
             std::cerr << "checkcp: Skipping (no-clobber): " << dst << "\n";
         return true;
     }
 
+    // --- 3. Record existing destination hash before overwrite ---
     const fs::path dst_sc = sidecar_path(dst);
     const std::string prev_hash =
         (fs::exists(dst) && fs::exists(dst_sc)) ? read_sidecar(dst_sc) : "";
@@ -103,28 +114,23 @@ static bool copy_with_integrity(const fs::path& src, const fs::path& dst,
     if (opts.verbose)
         std::cerr << "checkcp: " << src.string() << " -> " << dst.string() << "\n";
 
-    std::string new_hash;
+    // --- 4. Copy + hash in one streaming pass ---
     try {
-        new_hash = copy_and_sha256(src, dst);
+        out_hash = copy_and_sha256(src, dst);
     } catch (const std::exception& e) {
         std::cerr << "checkcp: ERROR: " << e.what() << "\n";
         return false;
     }
 
-    if (!prev_hash.empty() && prev_hash != new_hash) {
+    // --- 5. Warn if destination content changed ---
+    if (!prev_hash.empty() && prev_hash != out_hash) {
         std::cerr << "checkcp: WARNING: Destination replaced with different content: " << dst << "\n"
                   << "checkcp:   Previous: " << prev_hash << "\n"
-                  << "checkcp:   New:      " << new_hash << "\n";
+                  << "checkcp:   New:      " << out_hash << "\n";
         ++warnings;
     }
 
-    try {
-        write_sidecar(dst_sc, new_hash, dst);
-    } catch (const std::exception& e) {
-        std::cerr << "checkcp: WARNING: " << e.what() << "\n";
-        ++warnings;
-    }
-
+    // --- 6. Optionally preserve permissions ---
     if (opts.preserve) {
         try {
             fs::permissions(dst, fs::status(src).permissions());
@@ -135,6 +141,26 @@ static bool copy_with_integrity(const fs::path& src, const fs::path& dst,
     return true;
 }
 
+// Single-file copy with a per-file '<dest>.sha256' sidecar.
+static bool copy_with_integrity(const fs::path& src, const fs::path& dst,
+                                 const Options& opts, int& warnings, int& copied) {
+    std::string hash;
+    if (!copy_file_core(src, dst, opts, warnings, copied, hash))
+        return false;
+    if (!hash.empty()) {
+        try {
+            write_sidecar(sidecar_path(dst), hash, dst);
+        } catch (const std::exception& e) {
+            std::cerr << "checkcp: WARNING: " << e.what() << "\n";
+            ++warnings;
+        }
+    }
+    return true;
+}
+
+// Recursively copy src_dir into dst_dir and write a single 'checksums.sha256'
+// in dst_dir listing every copied file with its relative path.
+// .sha256 files in the source tree are skipped — they are regenerated at the destination.
 static void copy_dir_recursive(const fs::path& src_dir, const fs::path& dst_dir,
                                 const Options& opts, int& warnings, int& errors, int& copied) {
     try {
@@ -147,6 +173,8 @@ static void copy_dir_recursive(const fs::path& src_dir, const fs::path& dst_dir,
         ++errors;
         return;
     }
+
+    std::vector<std::pair<fs::path, std::string>> entries;
 
     for (const auto& entry : fs::recursive_directory_iterator(
              src_dir, fs::directory_options::skip_permission_denied)) {
@@ -171,8 +199,22 @@ static void copy_dir_recursive(const fs::path& src_dir, const fs::path& dst_dir,
                 ++errors;
             }
         } else if (entry.is_regular_file()) {
-            if (!copy_with_integrity(src_entry, dst_entry, opts, warnings, copied))
+            std::string hash;
+            if (copy_file_core(src_entry, dst_entry, opts, warnings, copied, hash)) {
+                if (!hash.empty())
+                    entries.emplace_back(rel, hash);
+            } else {
                 ++errors;
+            }
+        }
+    }
+
+    if (!entries.empty()) {
+        try {
+            write_dir_sidecar(dst_dir / "checksums.sha256", entries);
+        } catch (const std::exception& e) {
+            std::cerr << "checkcp: WARNING: " << e.what() << "\n";
+            ++warnings;
         }
     }
 }
@@ -251,6 +293,12 @@ int main(int argc, char* argv[]) {
     int errors   = 0;
     int copied   = 0;
 
+    // When copying multiple source files into a directory, collect hashes for a
+    // single checksums.sha256. Directory sources handle their own sidecar via
+    // copy_dir_recursive. Single-file copies use a per-file sidecar.
+    const bool use_shared_sidecar = (sources.size() > 1);
+    std::vector<std::pair<fs::path, std::string>> shared_entries;
+
     for (const auto& src : sources) {
         if (!fs::exists(src)) {
             std::cerr << "checkcp: " << src << ": No such file or directory\n";
@@ -264,6 +312,9 @@ int main(int argc, char* argv[]) {
                 ++errors;
                 continue;
             }
+            // Mirror cp -r behaviour:
+            //   dest exists as directory → copy src *into* dest (dest/src_name/)
+            //   dest does not exist      → copy src *as* dest
             const fs::path actual_dst =
                 fs::is_directory(dest) ? dest / src.filename() : dest;
             copy_dir_recursive(src, actual_dst, opts, warnings, errors, copied);
@@ -273,10 +324,30 @@ int main(int argc, char* argv[]) {
         const fs::path actual_dst =
             fs::is_directory(dest) ? dest / src.filename() : dest;
 
-        if (!copy_with_integrity(src, actual_dst, opts, warnings, copied))
-            ++errors;
+        if (use_shared_sidecar) {
+            std::string hash;
+            if (copy_file_core(src, actual_dst, opts, warnings, copied, hash)) {
+                if (!hash.empty())
+                    shared_entries.emplace_back(actual_dst.filename(), hash);
+            } else {
+                ++errors;
+            }
+        } else {
+            if (!copy_with_integrity(src, actual_dst, opts, warnings, copied))
+                ++errors;
+        }
     }
 
+    if (!shared_entries.empty()) {
+        try {
+            write_dir_sidecar(dest / "checksums.sha256", shared_entries);
+        } catch (const std::exception& e) {
+            std::cerr << "checkcp: WARNING: " << e.what() << "\n";
+            ++warnings;
+        }
+    }
+
+    // Always print a clear integrity status so the outcome is unambiguous
     if (errors == 0 && warnings == 0) {
         std::cerr << "checkcp: VERIFIED — " << copied << " file(s) copied and integrity confirmed.\n";
     } else if (errors == 0) {

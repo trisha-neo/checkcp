@@ -15,6 +15,7 @@ static std::string finalise_hex(EVP_MD_CTX* ctx) {
     EVP_DigestFinal_ex(ctx, hash, &len);
     EVP_MD_CTX_free(ctx);
 
+    // SHA-256 always produces 32 bytes → 64 hex chars
     char hex[65];
     for (unsigned int i = 0; i < len; ++i)
         snprintf(hex + i * 2, 3, "%02x", hash[i]);
@@ -83,6 +84,7 @@ std::string read_sidecar(const std::filesystem::path& sidecar) {
         return "";
     std::string hash;
     f >> hash;
+    // SHA-256 hex is exactly 64 characters
     return (hash.size() == 64) ? hash : "";
 }
 
@@ -92,5 +94,15 @@ void write_sidecar(const std::filesystem::path& sidecar,
     std::ofstream f(sidecar);
     if (!f)
         throw std::runtime_error("Cannot write sidecar: " + sidecar.string());
+    // sha256sum-compatible format: two spaces between hash and filename
     f << hash << "  " << file.filename().string() << "\n";
+}
+
+void write_dir_sidecar(const std::filesystem::path& sidecar,
+                       const std::vector<std::pair<std::filesystem::path, std::string>>& entries) {
+    std::ofstream f(sidecar);
+    if (!f)
+        throw std::runtime_error("Cannot write sidecar: " + sidecar.string());
+    for (const auto& [rel, hash] : entries)
+        f << hash << "  " << rel.string() << "\n";
 }
