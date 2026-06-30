@@ -39,6 +39,7 @@ static int verify_file(const fs::path& file) {
     if (!fs::exists(file)) {
         std::cerr << "checkcp: " << file << ": No such file or directory\n";
         return 1;
+    }
     const fs::path sc = sidecar_path(file);
     if (!fs::exists(sc)) {
         std::cerr << "checkcp: No sidecar found: " << sc << "\n";
