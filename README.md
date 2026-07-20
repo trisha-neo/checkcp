@@ -29,7 +29,7 @@ xcode-select --install
 brew install openssl pkg-config
 
 # 2. Clone the repository
-git clone https://github.com/<your-username>/checkcp.git
+git clone https://github.com/<trisha-neo>/checkcp.git
 cd checkcp
 
 # 3. Build
@@ -47,7 +47,7 @@ sudo apt update
 sudo apt install -y g++ libssl-dev pkg-config
 
 # 2. Clone the repository
-git clone https://github.com/<your-username>/checkcp.git
+git clone https://github.com/<trisha-neo>/checkcp.git
 cd checkcp
 
 # 3. Build
@@ -64,7 +64,7 @@ sudo make install
 sudo dnf install -y gcc-c++ openssl-devel pkg-config
 
 # 2. Clone the repository
-git clone https://github.com/<your-username>/checkcp.git
+git clone https://github.com/<trisha-neo>/checkcp.git
 cd checkcp
 
 # 3. Build
@@ -88,7 +88,7 @@ xcode-select --install
 brew install openssl cmake
 
 # 2. Clone the repository
-git clone https://github.com/<your-username>/checkcp.git
+git clone https://github.com/<trisha-neo>/checkcp.git
 cd checkcp
 
 # 3. Configure
@@ -109,7 +109,7 @@ sudo apt update
 sudo apt install -y g++ libssl-dev cmake
 
 # 2. Clone the repository
-git clone https://github.com/<your-username>/checkcp.git
+git clone https://github.com/<trisha-neo>/checkcp.git
 cd checkcp
 
 # 3. Configure
@@ -129,7 +129,7 @@ sudo cmake --install build
 sudo dnf install -y gcc-c++ openssl-devel cmake
 
 # 2. Clone the repository
-git clone https://github.com/<your-username>/checkcp.git
+git clone https://github.com/<trisha-neo>/checkcp.git
 cd checkcp
 
 # 3. Configure
