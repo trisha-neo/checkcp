@@ -1,18 +1,52 @@
 CXX      ?= g++
+CC       ?= cc
 CXXFLAGS  = -std=c++17 -O2 -Wall -Wextra -Isrc
+CFLAGS   ?= -O3
 TARGET    = checkcp
-SRCS      = src/main.cpp src/checksum.cpp
+CXX_SRCS  = src/main.cpp src/checksum.cpp
 
+# Use pkg-config when available (handles Homebrew OpenSSL on macOS automatically)
 OPENSSL_CFLAGS := $(shell pkg-config --cflags libcrypto 2>/dev/null)
 OPENSSL_LIBS   := $(shell pkg-config --libs   libcrypto 2>/dev/null || echo "-lcrypto")
 
-$(TARGET): $(SRCS) src/checksum.h
-	$(CXX) $(CXXFLAGS) $(OPENSSL_CFLAGS) -o $@ $(SRCS) $(OPENSSL_LIBS)
+# --- Vendored BLAKE3: pick SIMD sources by architecture ---
+ARCH   := $(shell uname -m)
+B3_DIR := src/blake3
+B3_COMMON := $(B3_DIR)/blake3.c $(B3_DIR)/blake3_dispatch.c $(B3_DIR)/blake3_portable.c
+
+ifneq (,$(filter arm64 aarch64,$(ARCH)))
+  # NEON is mandatory on ARMv8, so enable it unconditionally (no runtime dispatch).
+  B3_SRCS   := $(B3_COMMON) $(B3_DIR)/blake3_neon.c
+  B3_CFLAGS := -DBLAKE3_USE_NEON=1
+else ifeq ($(ARCH),x86_64)
+  # x86-64 SIMD via assembly (no per-file intrinsic flags needed); dispatched at runtime.
+  B3_SRCS   := $(B3_COMMON) \
+               $(B3_DIR)/blake3_sse2_x86-64_unix.S \
+               $(B3_DIR)/blake3_sse41_x86-64_unix.S \
+               $(B3_DIR)/blake3_avx2_x86-64_unix.S \
+               $(B3_DIR)/blake3_avx512_x86-64_unix.S
+  B3_CFLAGS :=
+else
+  # Portable fallback: no SIMD.
+  B3_SRCS   := $(B3_COMMON)
+  B3_CFLAGS := -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 -DBLAKE3_NO_NEON
+endif
+
+B3_OBJS := $(addsuffix .o,$(basename $(B3_SRCS)))
+
+$(B3_DIR)/%.o: $(B3_DIR)/%.c
+	$(CC) $(CFLAGS) $(B3_CFLAGS) -Isrc -c $< -o $@
+
+$(B3_DIR)/%.o: $(B3_DIR)/%.S
+	$(CC) $(CFLAGS) $(B3_CFLAGS) -Isrc -c $< -o $@
+
+$(TARGET): $(CXX_SRCS) src/checksum.h $(B3_OBJS)
+	$(CXX) $(CXXFLAGS) $(OPENSSL_CFLAGS) -o $@ $(CXX_SRCS) $(B3_OBJS) $(OPENSSL_LIBS)
 
 install: $(TARGET)
 	install -m 755 $(TARGET) /usr/local/bin/$(TARGET)
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(B3_OBJS)
 
 .PHONY: install clean

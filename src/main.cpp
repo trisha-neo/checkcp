@@ -13,17 +13,23 @@ struct Options {
     bool preserve   = false;
     bool no_clobber = false;
     bool recursive  = false;
+    Algo algo       = Algo::Blake3;
 };
+
+// Name of the shared multi-file sidecar for a given algorithm, e.g. "checksums.blake3".
+static std::string shared_sidecar_name(Algo algo) {
+    return "checksums" + algo_extension(algo);
+}
 
 static void print_usage() {
     std::cerr <<
         "Usage: checkcp [OPTIONS] SOURCE DEST\n"
         "       checkcp [OPTIONS] SOURCE... DIRECTORY\n"
         "\n"
-        "A drop-in replacement for cp that maintains SHA-256 integrity sidecars.\n"
-        "Single file: a '<file>.sha256' sidecar is written alongside the destination.\n"
-        "Multiple files or directory: a single 'checksums.sha256' is written in the\n"
-        "destination directory, compatible with 'sha256sum -c checksums.sha256'.\n"
+        "A drop-in replacement for cp that maintains integrity sidecars.\n"
+        "Single file: a '<file>.<algo>' sidecar is written alongside the destination.\n"
+        "Multiple files or directory: a single 'checksums.<algo>' is written in the\n"
+        "destination directory, compatible with 'sha256sum -c' / 'b3sum -c'.\n"
         "Warnings are emitted when source or destination integrity checks fail.\n"
         "\n"
         "Options:\n"
@@ -31,16 +37,17 @@ static void print_usage() {
         "  -v, --verbose        Report each file copied\n"
         "  -p, --preserve       Preserve source file permissions\n"
         "  -n, --no-clobber     Do not overwrite existing destination files\n"
-        "      --verify FILE    Verify FILE against its .sha256 sidecar and exit\n"
+        "      --algo NAME      Hash algorithm: blake3 (default) or sha256\n"
+        "      --verify FILE    Verify FILE against its sidecar and exit\n"
         "  -h, --help           Show this help\n";
 }
 
-static int verify_file(const fs::path& file) {
+static int verify_file(const fs::path& file, Algo algo) {
     if (!fs::exists(file)) {
         std::cerr << "checkcp: " << file << ": No such file or directory\n";
         return 1;
     }
-    const fs::path sc = sidecar_path(file);
+    const fs::path sc = sidecar_path(file, algo);
     if (!fs::exists(sc)) {
         std::cerr << "checkcp: No sidecar found: " << sc << "\n";
         return 1;
@@ -52,7 +59,7 @@ static int verify_file(const fs::path& file) {
     }
     std::string actual;
     try {
-        actual = sha256_file(file);
+        actual = hash_file(file, algo);
     } catch (const std::exception& e) {
         std::cerr << "checkcp: " << e.what() << "\n";
         return 1;
@@ -76,14 +83,14 @@ static bool copy_file_core(const fs::path& src, const fs::path& dst,
     out_hash.clear();
 
     // --- 1. Verify source integrity if a sidecar exists ---
-    const fs::path src_sc = sidecar_path(src);
+    const fs::path src_sc = sidecar_path(src, opts.algo);
     if (fs::exists(src_sc)) {
         const std::string stored = read_sidecar(src_sc);
         if (!stored.empty()) {
             if (opts.verbose)
                 std::cerr << "checkcp: Verifying source: " << src << "\n";
             try {
-                const std::string actual = sha256_file(src);
+                const std::string actual = hash_file(src, opts.algo);
                 if (actual != stored) {
                     std::cerr << "checkcp: WARNING: Source integrity FAILED: " << src << "\n"
                               << "checkcp:   Stored:   " << stored << "\n"
@@ -108,7 +115,7 @@ static bool copy_file_core(const fs::path& src, const fs::path& dst,
     }
 
     // --- 3. Record existing destination hash before overwrite ---
-    const fs::path dst_sc = sidecar_path(dst);
+    const fs::path dst_sc = sidecar_path(dst, opts.algo);
     const std::string prev_hash =
         (fs::exists(dst) && fs::exists(dst_sc)) ? read_sidecar(dst_sc) : "";
 
@@ -117,7 +124,7 @@ static bool copy_file_core(const fs::path& src, const fs::path& dst,
 
     // --- 4. Copy + hash in one streaming pass ---
     try {
-        out_hash = copy_and_sha256(src, dst);
+        out_hash = copy_and_hash(src, dst, opts.algo);
     } catch (const std::exception& e) {
         std::cerr << "checkcp: ERROR: " << e.what() << "\n";
         return false;
@@ -150,7 +157,7 @@ static bool copy_with_integrity(const fs::path& src, const fs::path& dst,
         return false;
     if (!hash.empty()) {
         try {
-            write_sidecar(sidecar_path(dst), hash, dst);
+            write_sidecar(sidecar_path(dst, opts.algo), hash, dst);
         } catch (const std::exception& e) {
             std::cerr << "checkcp: WARNING: " << e.what() << "\n";
             ++warnings;
@@ -159,9 +166,9 @@ static bool copy_with_integrity(const fs::path& src, const fs::path& dst,
     return true;
 }
 
-// Recursively copy src_dir into dst_dir and write a single 'checksums.sha256'
+// Recursively copy src_dir into dst_dir and write a single 'checksums.<algo>'
 // in dst_dir listing every copied file with its relative path.
-// .sha256 files in the source tree are skipped — they are regenerated at the destination.
+// Sidecar files in the source tree are skipped — they are regenerated at the destination.
 static void copy_dir_recursive(const fs::path& src_dir, const fs::path& dst_dir,
                                 const Options& opts, int& warnings, int& errors, int& copied) {
     try {
@@ -182,8 +189,8 @@ static void copy_dir_recursive(const fs::path& src_dir, const fs::path& dst_dir,
 
         const fs::path& src_entry = entry.path();
 
-        // Skip .sha256 sidecars — they will be regenerated for the destination
-        if (src_entry.extension() == ".sha256")
+        // Skip integrity sidecars — they will be regenerated for the destination
+        if (src_entry.extension() == ".sha256" || src_entry.extension() == ".blake3")
             continue;
 
         const fs::path rel       = fs::relative(src_entry, src_dir);
@@ -212,7 +219,7 @@ static void copy_dir_recursive(const fs::path& src_dir, const fs::path& dst_dir,
 
     if (!entries.empty()) {
         try {
-            write_dir_sidecar(dst_dir / "checksums.sha256", entries);
+            write_dir_sidecar(dst_dir / shared_sidecar_name(opts.algo), entries);
         } catch (const std::exception& e) {
             std::cerr << "checkcp: WARNING: " << e.what() << "\n";
             ++warnings;
@@ -244,6 +251,17 @@ int main(int argc, char* argv[]) {
             }
             verify_mode   = true;
             verify_target = argv[++i];
+        } else if (arg == "--algo") {
+            if (i + 1 >= argc) {
+                std::cerr << "checkcp: --algo requires an argument (sha256 or blake3)\n";
+                return 1;
+            }
+            const std::string name = argv[++i];
+            if (!parse_algo(name, opts.algo)) {
+                std::cerr << "checkcp: Unknown algorithm: " << name
+                          << " (expected sha256 or blake3)\n";
+                return 1;
+            }
         } else if (arg == "--verbose") {
             opts.verbose = true;
         } else if (arg == "--preserve") {
@@ -272,7 +290,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (verify_mode)
-        return verify_file(verify_target);
+        return verify_file(verify_target, opts.algo);
 
     if (positional.size() < 2) {
         std::cerr << "checkcp: Missing source or destination operand\n";
@@ -341,7 +359,7 @@ int main(int argc, char* argv[]) {
 
     if (!shared_entries.empty()) {
         try {
-            write_dir_sidecar(dest / "checksums.sha256", shared_entries);
+            write_dir_sidecar(dest / shared_sidecar_name(opts.algo), shared_entries);
         } catch (const std::exception& e) {
             std::cerr << "checkcp: WARNING: " << e.what() << "\n";
             ++warnings;
