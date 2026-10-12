@@ -5,12 +5,41 @@ CFLAGS   ?= -O3
 TARGET    = checkcp
 CXX_SRCS  = src/main.cpp src/checksum.cpp
 
+OS   := $(shell uname -s)
+ARCH := $(shell uname -m)
+
+# STATIC=1 (default) produces a self-contained binary:
+#   Linux: fully static (-static), runs on any distro regardless of its libc.
+#   macOS: OpenSSL linked statically. Apple does not support fully static binaries, so
+#          the result still links libSystem and libc++, which ship with every macOS install.
+# STATIC=0 links OpenSSL dynamically.
+STATIC ?= 1
+
+# Oldest macOS the binary will run on. Must not be lower than what Homebrew built
+# libcrypto.a for (15.0 for current bottles), or ld warns and the binary may misbehave.
+MACOSX_DEPLOYMENT_TARGET ?= 15.0
+
 # Use pkg-config when available (handles Homebrew OpenSSL on macOS automatically)
 OPENSSL_CFLAGS := $(shell pkg-config --cflags libcrypto 2>/dev/null)
-OPENSSL_LIBS   := $(shell pkg-config --libs   libcrypto 2>/dev/null || echo "-lcrypto")
+
+ifeq ($(STATIC)-$(OS),1-Darwin)
+  # ld64 always prefers a .dylib over a .a found via -L, so name the archive explicitly.
+  OPENSSL_LIBDIR := $(shell pkg-config --variable=libdir libcrypto 2>/dev/null || echo "$$(brew --prefix openssl@3)/lib")
+  OPENSSL_LIBS   := $(OPENSSL_LIBDIR)/libcrypto.a
+  ARCH_FLAGS     := -mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET)
+  LDFLAGS_STATIC :=
+else ifeq ($(STATIC)-$(OS),1-Linux)
+  # --static adds libcrypto's own dependencies (-ldl, -pthread, ...) needed for a static link.
+  OPENSSL_LIBS   := $(shell pkg-config --static --libs libcrypto 2>/dev/null || echo "-lcrypto -ldl -pthread")
+  ARCH_FLAGS     :=
+  LDFLAGS_STATIC := -static
+else
+  OPENSSL_LIBS   := $(shell pkg-config --libs libcrypto 2>/dev/null || echo "-lcrypto")
+  ARCH_FLAGS     :=
+  LDFLAGS_STATIC :=
+endif
 
 # --- Vendored BLAKE3: pick SIMD sources by architecture ---
-ARCH   := $(shell uname -m)
 B3_DIR := src/blake3
 B3_COMMON := $(B3_DIR)/blake3.c $(B3_DIR)/blake3_dispatch.c $(B3_DIR)/blake3_portable.c
 
@@ -35,13 +64,13 @@ endif
 B3_OBJS := $(addsuffix .o,$(basename $(B3_SRCS)))
 
 $(B3_DIR)/%.o: $(B3_DIR)/%.c
-	$(CC) $(CFLAGS) $(B3_CFLAGS) -Isrc -c $< -o $@
+	$(CC) $(CFLAGS) $(ARCH_FLAGS) $(B3_CFLAGS) -Isrc -c $< -o $@
 
 $(B3_DIR)/%.o: $(B3_DIR)/%.S
-	$(CC) $(CFLAGS) $(B3_CFLAGS) -Isrc -c $< -o $@
+	$(CC) $(CFLAGS) $(ARCH_FLAGS) $(B3_CFLAGS) -Isrc -c $< -o $@
 
 $(TARGET): $(CXX_SRCS) src/checksum.h $(B3_OBJS)
-	$(CXX) $(CXXFLAGS) $(OPENSSL_CFLAGS) -o $@ $(CXX_SRCS) $(B3_OBJS) $(OPENSSL_LIBS)
+	$(CXX) $(CXXFLAGS) $(ARCH_FLAGS) $(OPENSSL_CFLAGS) $(LDFLAGS_STATIC) -o $@ $(CXX_SRCS) $(B3_OBJS) $(OPENSSL_LIBS)
 
 install: $(TARGET)
 	install -m 755 $(TARGET) /usr/local/bin/$(TARGET)

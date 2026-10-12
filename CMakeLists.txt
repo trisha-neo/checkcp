@@ -1,10 +1,33 @@
 cmake_minimum_required(VERSION 3.15)
+
+# Oldest macOS the binary will run on. Must not be lower than what Homebrew built
+# libcrypto.a for (15.0 for current bottles). Must precede project().
+set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum macOS version")
+
 project(checkcp VERSION 1.1.0 LANGUAGES CXX C ASM)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Produce a self-contained binary. On Linux it is fully static (-static) and runs on
+# any distro regardless of its libc. On macOS only OpenSSL is linked statically: Apple
+# does not support fully static binaries, so the result still links libSystem and
+# libc++, which ship with every macOS install.
+option(CHECKCP_STATIC "Build a self-contained binary" ON)
+
+if(APPLE AND NOT OPENSSL_ROOT_DIR)
+    # Homebrew's openssl@3 is keg-only, so point FindOpenSSL at it.
+    execute_process(COMMAND brew --prefix openssl@3
+        OUTPUT_VARIABLE _brew_openssl OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(_brew_openssl)
+        set(OPENSSL_ROOT_DIR ${_brew_openssl})
+    endif()
+endif()
+
+if(CHECKCP_STATIC)
+    set(OPENSSL_USE_STATIC_LIBS TRUE)
+endif()
 find_package(OpenSSL REQUIRED)
 
 # --- Vendored BLAKE3: pick SIMD sources by architecture ---
@@ -47,6 +70,13 @@ add_executable(checkcp
 
 target_include_directories(checkcp PRIVATE src)
 target_link_libraries(checkcp PRIVATE OpenSSL::Crypto blake3)
+
+if(CHECKCP_STATIC AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Static libcrypto needs libdl and pthreads; they must follow it on the link line.
+    find_package(Threads REQUIRED)
+    target_link_libraries(checkcp PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+    target_link_options(checkcp PRIVATE -static)
+endif()
 
 target_compile_options(checkcp PRIVATE
     -Wall
